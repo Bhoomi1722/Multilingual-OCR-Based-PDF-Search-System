@@ -68,5 +68,3 @@ if search_button and uploaded_file and keywords_input:
         except Exception as e:
             st.error(f"Unexpected error: {str(e)}")
             st.info("Check logs or ensure Tesseract/Poppler are installed correctly.")
-
-st.caption("20% implementation • Core pipeline complete • Ready for extension (highlighting, DB, API, etc.)")
