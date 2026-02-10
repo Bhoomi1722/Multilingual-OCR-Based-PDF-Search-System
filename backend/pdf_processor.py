@@ -47,12 +47,25 @@ class PDFProcessor:
             logger.error(f"PDF to image conversion failed: {e}")
             raise
 
-    def process_pdf(self, pdf_path: str) -> Tuple[List[Tuple[int, str]], str]:
+    def process_pdf(self, pdf_path: str) -> Tuple[List[Tuple[int, str, float]], str]:
+        full_text = ""
+        pages = []  # will be List[Tuple[int, str, float]]
+        source = "unknown"
+
         if self.is_text_based(pdf_path):
-            pages_text = self.extract_unicode_text(pdf_path)
+            doc = fitz.open(pdf_path)
+            extracted_pages = []
+            for i, page in enumerate(doc):
+                text = page.get_text("text").strip()
+                extracted_pages.append((i + 1, text, 100.0))  # 100% confidence for unicode
+                full_text += text + " "
+            doc.close()
+            pages = extracted_pages
             source = "unicode"
         else:
-            images = self.convert_to_images(pdf_path)
-            pages_text = self.ocr_handler.ocr_pdf_pages(images)
+            images = convert_from_path(pdf_path, dpi=300)
+            pages = self.ocr_handler.ocr_pdf_pages(images)  # already returns [(page, text, conf)]
+            full_text = " ".join(text for _, text, _ in pages)
             source = "ocr"
-        return pages_text, source
+
+        return pages, source
