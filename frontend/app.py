@@ -1,220 +1,236 @@
-import sys
-from pathlib import Path
-project_root = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(project_root))
-
+# app.py
 import streamlit as st
 import pandas as pd
-from io import StringIO, BytesIO
-from fpdf import FPDF
 import re
+import os
 import time
+from pathlib import Path
+from datetime import datetime
+from io import StringIO
 
-from backend.pdf_processor import PDFProcessor
-from backend.search_engine import SearchEngine
+# ─── Your backend imports ───────────────────────────────────────────────────
+from backend.config import (
+    MAX_FILE_SIZE_MB, TEXT_BASED_THRESHOLD_CHARS,
+    OCR_LANG, OCR_PREFERRED_PSMS, FUZZY_MATCH_THRESHOLD
+)
 from backend.utils import (
-    save_uploaded_file, cleanup_temp_file, PDFProcessingError,
+    save_uploaded_file, cleanup_temp_file, get_context,
     init_db, save_processed, get_processed_files
 )
+from backend.pdf_processor import PDFProcessor
+from backend.search_engine import SearchEngine
 
 init_db()
 
-if "pdf_buffer" not in st.session_state:
-    st.session_state.pdf_buffer = None
-if "pdf_filename" not in st.session_state:
-    st.session_state.pdf_filename = None
+# ─── Page config ────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="Multilingual OCR PDF Search",
+    page_icon="🔍",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-st.set_page_config(page_title="Multilingual OCR PDF Search", layout="wide")
-st.title("Multilingual OCR-Based PDF Search System")
-st.markdown("**Telugu & Urdu – Improved OCR & Fuzzy Search**  •  ~60–70% Prototype")
+# ─── Title & Subtitle ───────────────────────────────────────────────────────
+st.title("Multilingual OCR PDF Search")
+st.caption("Telugu + Urdu • Scanned & Digital PDFs • Exact + Fuzzy Matching • ~70–75% Prototype")
 
+# ─── Sidebar ────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("Settings")
-    st.info("Tesseract must have tel+urd languages installed")
-
-tab_search, tab_history = st.tabs(["📤 Search PDF", "📚 History"])
-
-with tab_search:
-    uploaded_file = st.file_uploader("Upload PDF", type="pdf")
-    keywords_input = st.text_input(
-        "Keywords (comma separated, Telugu/Urdu supported)",
-        placeholder="పుస్తకం, రాముడు, کتاب"
-    )
-    search_btn = st.button("🔍 Search", type="primary", use_container_width=True)
-
-    if search_btn and uploaded_file and keywords_input:
-        with st.spinner("Processing (improved OCR + fuzzy search)..."):
-            try:
-                filepath = save_uploaded_file(uploaded_file)
-                processor = PDFProcessor()
-                page_data, source = processor.process_pdf(filepath)   # now returns list of (page, text, conf)
-
-                full_text_all = " ".join(item[1] for item in page_data)  # safe: take second element
-                save_processed(uploaded_file.name, len(page_data), source, len(full_text_all))
-
-                keywords = [k.strip() for k in keywords_input.split(",") if k.strip()]
-
-                progress = st.progress(0)
-                for i in range(100):
-                    time.sleep(0.008)
-                    progress.progress(i + 1)
-
-                engine = SearchEngine()
-                results = engine.search_keywords(page_data, keywords, source)
-
-                cleanup_temp_file(filepath)
-                progress.empty()
-
-                if results:
-                    st.success(f"Found {len(results)} matches (exact + fuzzy)")
-
-                    # ─── Results with context highlights ────────────────────────────────
-                    st.subheader("Search Results (context snippets)")
-                    for res in results:
-                        with st.expander(f"Page {res['page']} • {res['keyword']}  ({res['match_type'].upper()})"):
-                            st.write(f"**Matched:** {res['match']}")
-                            highlighted = res['context'].replace(
-                                res['match'],
-                                f"<mark style='background:#ffff99; padding:2px 4px'>{res['match']}</mark>"
-                            )
-                            st.markdown(f"**Context:** {highlighted}", unsafe_allow_html=True)
-                            st.caption(f"Confidence: {res['page_conf']:.1f}% • {res['source'].upper()}")
-
-                    # ─── Full page view with all highlights ─────────────────────────────
-                    st.subheader("Full Page Text – All Matches Highlighted")
-                    for page_num, text, conf in page_data:
-                        highlighted_text = text
-                        for res in [r for r in results if r["page"] == page_num]:
-                            pattern = re.escape(res["match"])
-                            highlighted_text = re.sub(
-                                f"({pattern})",
-                                r"<mark style='background:#ffff99; padding:2px 4px'>\1</mark>",
-                                highlighted_text,
-                                flags=re.IGNORECASE
-                            )
-                        with st.expander(f"Page {page_num} (conf: {conf:.1f}%)"):
-                            st.markdown(highlighted_text, unsafe_allow_html=True)
-
-                    # ─── CSV export ─────────────────────────────────────────────────────
-                    df = pd.DataFrame([
-                        {
-                            "Page": r["page"],
-                            "Keyword": r["keyword"],
-                            "Match": r["match"],
-                            "Match Type": r["match_type"],
-                            "Context": r["context"],
-                            "Confidence": f"{r['page_conf']:.1f}%",
-                            "Source": r["source"]
-                        } for r in results
-                    ])
-
-                    # ─── Put this AFTER the if results: block, but still indented under if results: ───
-                    st.subheader("Export Options")
-                    col1, col2 = st.columns(2)
-
-                    with col1:
-                        # CSV button (already working)
-                        csv_buffer = StringIO()
-                        df.to_csv(csv_buffer, index=False)
-                        st.download_button(
-                            "Download Results CSV",
-                            csv_buffer.getvalue(),
-                            f"{uploaded_file.name}_results.csv",
-                            "text/csv",
-                            key="csv_download"
-                        )
-
-                    # Generate PDF only once when results are ready
-                    if results and st.session_state.pdf_buffer is None:
-                        with st.spinner("Preparing PDF report (using ReportLab)..."):
-                            try:
-                                from reportlab.lib.pagesizes import letter
-                                from reportlab.pdfgen import canvas
-                                from reportlab.pdfbase import pdfmetrics
-                                from reportlab.pdfbase.ttfonts import TTFont
-                                from io import BytesIO
-
-                                pdf_buffer = BytesIO()
-                                c = canvas.Canvas(pdf_buffer, pagesize=letter)
-                                width, height = letter
-
-                                # Register fonts (absolute path)
-                                font_path_tel = str(Path(__file__).parent.parent / "AnekTelugu-Regular.ttf")
-                                font_path_urd = str(Path(__file__).parent.parent / "NotoNastaliqUrdu-Regular.ttf")
-
-                                pdfmetrics.registerFont(TTFont('NotoTelugu', font_path_tel))
-                                pdfmetrics.registerFont(TTFont('NotoUrdu', font_path_urd))
-
-                                # Choose font
-                                font_family = 'NotoTelugu'  # default
-                                if any(c in 'اردو کتاب رام' for c in full_text_all[:200]):
-                                    font_family = 'NotoUrdu'
-
-                                c.setFont(font_family, 14)
-
-                                # Title
-                                c.drawCentredString(width/2, height - 50, f"Search Report: {uploaded_file.name}")
-                                c.drawCentredString(width/2, height - 70, f"Keywords: {', '.join(keywords)}")
-                                y = height - 100
-
-                                c.setFont(font_family, 12)
-                                c.drawString(50, y, "Extracted Content with Matches")
-                                y -= 30
-
-                                # Content per page
-                                for page_num, text, conf in page_data[:10]:  # limit pages
-                                    c.setFont(font_family, 12)
-                                    c.drawString(50, y, f"Page {page_num} (conf: {conf:.1f}%)")
-                                    y -= 20
-
-                                    c.setFont(font_family, 10)
-
-                                    page_text = text[:2000]
-                                    # Replace matches with visible markers
-                                    for res in [r for r in results if r["page"] == page_num]:
-                                        page_text = page_text.replace(res["match"], f"[{res['match']}]")
-
-                                    # Split text into lines (ReportLab doesn't auto-wrap well)
-                                    lines = page_text.split('\n')
-                                    for line in lines:
-                                        if y < 50:  # new page if needed
-                                            c.showPage()
-                                            y = height - 50
-                                            c.setFont(font_family, 10)
-                                        c.drawString(50, y, line)
-                                        y -= 12
-
-                                    y -= 20  # space between pages
-
-                                c.save()
-                                pdf_buffer.seek(0)
-
-                                st.session_state.pdf_buffer = pdf_buffer
-                                st.session_state.pdf_filename = f"{uploaded_file.name}_report.pdf"
-
-                                st.success("PDF report ready using ReportLab! Download below.")
-
-                            except Exception as e:
-                                st.error(f"PDF failed: {str(e)}")
-                                st.info("Common fixes:\n1. Ensure .ttf files are in project root\n2. Check filenames exactly match\n3. pip install reportlab\n4. Try smaller text limits if PDF is too big")
-
-                    # ─── Download button ──────────────────────────────────────────────────────────
-                    if st.session_state.pdf_buffer is not None:
-                        st.download_button(
-                            label="Download PDF Report (with highlights)",
-                            data=st.session_state.pdf_buffer,
-                            file_name=st.session_state.pdf_filename,
-                            mime="application/pdf",
-                            key="pdf_download_final"
-                        )
-            except Exception as e:
-                st.error(f"Error: {str(e)}")
-                st.info("Check terminal / ensure Tesseract + tel+urd traineddata installed")
-
-with tab_history:
-    st.subheader("Processed Files History")
+    st.header("Controls")
+    
+    st.markdown("### Quick Stats")
     history = get_processed_files()
+    st.metric("Processed Files", len(history))
+    st.metric("Last Processed", history[0]["date"][:16] if history else "—")
+    
+    st.markdown("---")
+    
+    with st.expander("Display Options", expanded=True):
+        show_full_pages = st.checkbox("Show full page previews", value=True)
+        highlight_color = st.color_picker("Highlight color", "#ffff99")
+        max_results_show = st.slider("Max results to expand", 3, 20, 8)
+    
+    with st.expander("About", expanded=False):
+        st.caption("Project: Multilingual OCR-Based PDF Search System")
+        st.caption("Focus: Telugu & Urdu")
+        st.caption("Features: Type detection • Preprocessing • Fuzzy search • Export")
+        st.caption("Status: ~70% complete")
+
+# ─── Top metrics row ────────────────────────────────────────────────────────
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Supported Languages", "Telugu + Urdu")
+col2.metric("Search Types", "Exact + Fuzzy")
+col3.metric("OCR Confidence Goal", ">75%")
+col4.metric("Max File Size", f"{MAX_FILE_SIZE_MB} MB")
+
+st.markdown("---")
+
+# ─── Main Tabs ──────────────────────────────────────────────────────────────
+tab_quick, tab_batch, tab_history = st.tabs([
+    "📄  Quick Search",
+    "📑  Batch / Multi-file",
+    "📊  History & Stats"
+])
+
+processor = PDFProcessor()
+engine = SearchEngine()
+
+# ─── QUICK SEARCH TAB ───────────────────────────────────────────────────────
+with tab_quick:
+    st.subheader("Search in Single Document")
+    
+    c1, c2 = st.columns([5, 3])
+    
+    with c1:
+        uploaded_file = st.file_uploader(
+            "Upload PDF (scanned or text-based)",
+            type="pdf",
+            help="Supports Telugu & Urdu in both unicode and image-based PDFs"
+        )
+    
+    with c2:
+        keywords_input = st.text_input(
+            "Keywords (comma separated)",
+            placeholder="రామాయణం, کتاب, పుస్తకం, राम",
+            key="quick_keywords"
+        )
+    
+    search_triggered = st.button("🔍  Start Search", type="primary", use_container_width=True)
+
+    if search_triggered and uploaded_file and keywords_input.strip():
+        with st.status("Processing document...", expanded=True) as status:
+            try:
+                status.update(label="Saving file...", state="running")
+                filepath = save_uploaded_file(uploaded_file)
+                
+                status.update(label="Detecting PDF type...", state="running")
+                page_data, source = processor.process_pdf(filepath)
+                
+                full_text = " ".join(text for _, text, _ in page_data)
+                save_processed(uploaded_file.name, len(page_data), source, len(full_text))
+                
+                status.update(label="Searching keywords...", state="running")
+                keywords = [k.strip() for k in keywords_input.split(",") if k.strip()]
+                results = engine.search_keywords(page_data, keywords, source, uploaded_file.name)
+                
+                status.update(label=f"Found {len(results)} matches", state="complete")
+                time.sleep(0.6)
+                
+                if results:
+                    st.success(f"**{len(results)} matches found**  •  {source.upper()} source  •  {len(page_data)} pages")
+                    
+                    # Result cards
+                    for i, r in enumerate(results):
+                        if i >= max_results_show:
+                            st.caption(f"... {len(results) - max_results_show} more matches hidden")
+                            break
+                            
+                        with st.expander(
+                            f"Page {r['page']}  •  {r['keyword']}  •  {r['match_type'].upper()}  •  score {r['score']:.0f}",
+                            expanded=(i < 3)
+                        ):
+                            cols = st.columns([4, 1])
+                            cols[0].markdown(
+                                f"**Matched:** {r['match']}\n\n"
+                                f"{r['context']}"
+                            )
+                            cols[1].caption(f"conf {r['page_conf']:.1f}%")
+                    
+                    if show_full_pages:
+                        with st.expander("Full Pages with Highlights", expanded=False):
+                            for page_num, text, conf in page_data[:6]:  # limit for performance
+                                h_text = text
+                                page_results = [r for r in results if r["page"] == page_num]
+                                for r in page_results:
+                                    h_text = re.sub(
+                                        f"({re.escape(r['match'])})",
+                                        f"<mark style='background:{highlight_color}; padding:2px 4px'>\g<1></mark>",
+                                        h_text,
+                                        flags=re.IGNORECASE
+                                    )
+                                st.markdown(f"**Page {page_num}** (conf {conf:.1f}%)  \n{h_text}", unsafe_allow_html=True)
+            
+            except Exception as e:
+                status.update(label=f"Error: {str(e)}", state="error")
+            finally:
+                if 'filepath' in locals():
+                    cleanup_temp_file(filepath)
+
+# ─── BATCH SEARCH TAB ───────────────────────────────────────────────────────
+with tab_batch:
+    st.subheader("Search Across Multiple Documents")
+    
+    uploaded_files = st.file_uploader(
+        "Upload one or more PDFs",
+        type="pdf",
+        accept_multiple_files=True,
+        help="Process and search across all selected files at once"
+    )
+    
+    batch_keywords = st.text_input(
+        "Keywords for batch search",
+        placeholder="Enter same keywords as above...",
+        key="batch_keywords"
+    )
+    
+    if st.button("🔍  Search All Files", type="primary") and uploaded_files and batch_keywords.strip():
+        with st.status("Batch processing started...", expanded=True) as status:
+            all_results = []
+            keywords = [k.strip() for k in batch_keywords.split(",") if k.strip()]
+            
+            for idx, file in enumerate(uploaded_files):
+                status.update(label=f"Processing {file.name} ({idx+1}/{len(uploaded_files)})", state="running")
+                try:
+                    path = save_uploaded_file(file)
+                    pages, src = processor.process_pdf(path)
+                    full = " ".join(t for _, t, _ in pages)
+                    save_processed(file.name, len(pages), src, len(full))
+                    
+                    res = engine.search_keywords(pages, keywords, src, file.name)
+                    all_results.extend(res)
+                    
+                    cleanup_temp_file(path)
+                except Exception as e:
+                    st.warning(f"Skipped {file.name}: {str(e)}")
+            
+            status.update(label=f"Completed • {len(all_results)} total matches", state="complete")
+            
+            if all_results:
+                st.success(f"**Batch complete** — {len(all_results)} matches across {len(uploaded_files)} files")
+                
+                # Grouped result display
+                for fname in set(r["filename"] for r in all_results):
+                    file_results = [r for r in all_results if r["filename"] == fname]
+                    with st.expander(f"{fname}  •  {len(file_results)} matches"):
+                        for r in file_results[:8]:
+                            st.markdown(
+                                f"**Page {r['page']}** • {r['keyword']} • **{r['match']}**  \n"
+                                f"{r['context']}  \n"
+                                f"<small>conf {r['page_conf']:.1f}% • score {r['score']:.0f}</small>",
+                                unsafe_allow_html=True
+                            )
+                        if len(file_results) > 8:
+                            st.caption(f"... and {len(file_results)-8} more")
+
+# ─── HISTORY TAB ────────────────────────────────────────────────────────────
+with tab_history:
+    st.subheader("Processing History")
+    
     if history:
-        st.dataframe(pd.DataFrame(history))
+        df_history = pd.DataFrame(history)
+        st.dataframe(
+            df_history[["filename", "date", "source", "pages"]],
+            column_config={
+                "filename": "Document",
+                "date": st.column_config.DatetimeColumn("Processed", format="D MMM YYYY • h:mm a"),
+                "source": st.column_config.TextColumn("Type"),
+                "pages": st.column_config.NumberColumn("Pages")
+            },
+            hide_index=True,
+            use_container_width=True
+        )
     else:
-        st.info("No files processed yet.")
+        st.info("No documents processed yet.", icon="📭")
+
+st.markdown("---")
+st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

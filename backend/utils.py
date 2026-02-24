@@ -1,10 +1,11 @@
 import logging
 import os
-from pathlib import Path
-from typing import List, Tuple, Dict, Any
 import sqlite3
 from datetime import datetime
-from backend.config import BASE_DIR,MAX_FILE_SIZE_MB,UPLOAD_FOLDER
+from pathlib import Path
+from typing import List, Dict
+
+from backend.config import BASE_DIR, UPLOAD_FOLDER, MAX_FILE_SIZE_MB, ALLOWED_EXTENSIONS
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -13,7 +14,7 @@ class PDFProcessingError(Exception):
     pass
 
 def allowed_file(filename: str) -> bool:
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in {"pdf"}
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def save_uploaded_file(uploaded_file) -> str:
     if not allowed_file(uploaded_file.name):
@@ -73,10 +74,10 @@ def save_processed(filename: str, page_count: int, source: str, text_length: int
     conn.commit()
     conn.close()
 
-def get_processed_files() -> list:
+def get_processed_files() -> List[Dict]:
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT filename, processed_at, source_type, page_count FROM processed_files ORDER BY processed_at DESC LIMIT 20")
+    c.execute("SELECT filename, processed_at, source_type, page_count FROM processed_files ORDER BY processed_at DESC LIMIT 30")
     rows = c.fetchall()
     conn.close()
     return [{"filename": r[0], "date": r[1], "source": r[2], "pages": r[3]} for r in rows]

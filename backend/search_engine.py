@@ -1,12 +1,20 @@
 import re
-from typing import List, Tuple, Dict, Any
+from typing import List, Dict, Any
 from rapidfuzz import fuzz, process
-from backend.utils import get_context, logger
+
+from backend.utils import get_context
 from backend.config import FUZZY_MATCH_THRESHOLD
 
 class SearchEngine:
-    def search_keywords(self, page_texts: List[Tuple[int, str, float]], keywords: List[str], source: str) -> List[Dict[str, Any]]:
+    def search_keywords(
+        self,
+        page_texts: List[tuple[int, str, float]],
+        keywords: List[str],
+        source: str,
+        filename: str = ""
+    ) -> List[Dict[str, Any]]:
         results = []
+
         for page_num, text, page_conf in page_texts:
             if not text.strip():
                 continue
@@ -16,26 +24,26 @@ class SearchEngine:
                 if not keyword:
                     continue
 
-                # 1. Exact matches
+                # Exact matches
                 pattern = re.compile(re.escape(keyword), re.UNICODE | re.IGNORECASE)
-                exact_matches = list(pattern.finditer(text))
-                for m in exact_matches:
+                for m in pattern.finditer(text):
                     match_str = m.group()
-                    context = get_context(text, match_str, 100)
+                    context = get_context(text, match_str)
                     results.append({
+                        "filename": filename,
                         "keyword": keyword,
                         "match": match_str,
                         "context": context,
                         "source": source,
-                        "confidence": "high" if source == "unicode" else "medium",
                         "page": page_num,
                         "page_conf": page_conf,
                         "match_type": "exact",
+                        "score": 100 + page_conf * 0.1,
                         "position": m.start()
                     })
 
-                # 2. Fuzzy matches (only if no exact)
-                if not exact_matches:
+                # Fuzzy matches (only if no exact match found on this page for this keyword)
+                if not any(r["page"] == page_num and r["keyword"] == keyword and r["match_type"] == "exact" for r in results):
                     words = text.split()
                     fuzzy_candidates = process.extract(
                         keyword, words,
@@ -43,24 +51,26 @@ class SearchEngine:
                         score_cutoff=FUZZY_MATCH_THRESHOLD
                     )
                     for match_str, score, _ in fuzzy_candidates:
-                        context = get_context(text, match_str, 100)
+                        context = get_context(text, match_str)
                         results.append({
+                            "filename": filename,
                             "keyword": keyword,
                             "match": match_str,
-                            "context": context + f" (fuzzy ~{score:.0f}%)",
+                            "context": context + f" (~{score:.0f}%)",
                             "source": source,
-                            "confidence": "medium",
                             "page": page_num,
                             "page_conf": page_conf,
                             "match_type": "fuzzy",
+                            "score": score + page_conf * 0.1,
                             "position": text.find(match_str)
                         })
 
-        # Sort: exact > fuzzy > confidence > page > position
+        # Sort: exact > fuzzy > score > page > position
         results.sort(key=lambda x: (
             0 if x["match_type"] == "exact" else 1,
-            -x["page_conf"],
+            -x["score"],
             x["page"],
             x["position"]
         ))
+
         return results
