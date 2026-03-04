@@ -2,7 +2,7 @@ import fitz  # PyMuPDF
 from pdf2image import convert_from_path
 from typing import List, Tuple
 
-from backend.config import TEXT_BASED_THRESHOLD_CHARS
+from backend.config import TEXT_BASED_THRESHOLD_CHARS, MAX_PAGES_LIMIT
 from backend.utils import logger
 from backend.ocr_handler import OCRHandler
 
@@ -31,6 +31,11 @@ class PDFProcessor:
 
     def process_scanned_pdf(self, pdf_path: str) -> List[Tuple[int, str, float]]:
         images = convert_from_path(pdf_path, dpi=300)
+        # Safeguard: limit pages
+        if len(images) > MAX_PAGES_LIMIT:
+            logger.warning(f"Large PDF ({len(images)} pages) → limiting to first {MAX_PAGES_LIMIT}")
+            images = images[:MAX_PAGES_LIMIT]
+        
         pages = []
         for idx, img in enumerate(images):
             logger.info(f"OCR page {idx+1}/{len(images)}")

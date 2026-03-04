@@ -24,7 +24,6 @@ class SearchEngine:
                 if not keyword:
                     continue
 
-                # Exact matches
                 pattern = re.compile(re.escape(keyword), re.UNICODE | re.IGNORECASE)
                 for m in pattern.finditer(text):
                     match_str = m.group()
@@ -42,7 +41,6 @@ class SearchEngine:
                         "position": m.start()
                     })
 
-                # Fuzzy matches (only if no exact match found on this page for this keyword)
                 if not any(r["page"] == page_num and r["keyword"] == keyword and r["match_type"] == "exact" for r in results):
                     words = text.split()
                     fuzzy_candidates = process.extract(
@@ -65,7 +63,6 @@ class SearchEngine:
                             "position": text.find(match_str)
                         })
 
-        # Sort: exact > fuzzy > score > page > position
         results.sort(key=lambda x: (
             0 if x["match_type"] == "exact" else 1,
             -x["score"],

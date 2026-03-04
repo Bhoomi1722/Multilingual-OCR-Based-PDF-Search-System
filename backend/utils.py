@@ -42,8 +42,6 @@ def get_context(text: str, word: str, window: int = 80) -> str:
     end = min(len(text), pos + len(word) + window)
     return "..." + text[start:end] + "..."
 
-# ─── SQLite helpers ────────────────────────────────────────────────────────────
-
 DB_PATH = BASE_DIR / "data" / "processed.db"
 
 def init_db():
