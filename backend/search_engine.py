@@ -24,10 +24,12 @@ class SearchEngine:
                 if not keyword:
                     continue
 
+                # Exact match
                 pattern = re.compile(re.escape(keyword), re.UNICODE | re.IGNORECASE)
                 for m in pattern.finditer(text):
                     match_str = m.group()
                     context = get_context(text, match_str)
+                    score = 100 + page_conf * 0.1
                     results.append({
                         "filename": filename,
                         "keyword": keyword,
@@ -37,10 +39,11 @@ class SearchEngine:
                         "page": page_num,
                         "page_conf": page_conf,
                         "match_type": "exact",
-                        "score": 100 + page_conf * 0.1,
+                        "score": score,
                         "position": m.start()
                     })
 
+                # Fuzzy match if no exact
                 if not any(r["page"] == page_num and r["keyword"] == keyword and r["match_type"] == "exact" for r in results):
                     words = text.split()
                     fuzzy_candidates = process.extract(
@@ -48,21 +51,26 @@ class SearchEngine:
                         scorer=fuzz.token_sort_ratio,
                         score_cutoff=FUZZY_MATCH_THRESHOLD
                     )
-                    for match_str, score, _ in fuzzy_candidates:
+                    for match_str, fscore, _ in fuzzy_candidates:
                         context = get_context(text, match_str)
+                        score = fscore + page_conf * 0.1
+                        # Boost exact substring matches
+                        if keyword.lower() in match_str.lower():
+                            score += 10
                         results.append({
                             "filename": filename,
                             "keyword": keyword,
                             "match": match_str,
-                            "context": context + f" (~{score:.0f}%)",
+                            "context": context + f" (~{fscore:.0f}%)",
                             "source": source,
                             "page": page_num,
                             "page_conf": page_conf,
                             "match_type": "fuzzy",
-                            "score": score + page_conf * 0.1,
+                            "score": score,
                             "position": text.find(match_str)
                         })
 
+        # Final ranking: exact first, then score, then page
         results.sort(key=lambda x: (
             0 if x["match_type"] == "exact" else 1,
             -x["score"],

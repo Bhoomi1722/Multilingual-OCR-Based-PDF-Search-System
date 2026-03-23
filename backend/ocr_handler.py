@@ -9,14 +9,33 @@ from backend.config import OCR_LANG, OCR_PREFERRED_PSMS
 from backend.utils import logger
 
 class OCRHandler:
+    # Class-level (shared across all instances)
+    _easy_reader = None
+    _easy_reader_initialized = False
+
     def __init__(self):
-        self.easy_reader = None
-        try:
-            self.easy_reader = easyocr.Reader(['ur', 'en'], gpu=False, verbose=False, download_enabled=True)
-            logger.info("EasyOCR initialized for Urdu support")
-        except Exception as e:
-            logger.warning(f"EasyOCR failed to load: {e}. Urdu fallback disabled. You can retry later or delete ~/.EasyOCR/model/ to force redownload.")
-            self.easy_reader = None
+        # Lazy initialize EasyOCR only once
+        if not OCRHandler._easy_reader_initialized:
+            try:
+                logger.info("Initializing EasyOCR for Urdu support (one-time)")
+                OCRHandler._easy_reader = easyocr.Reader(
+                    ['ur', 'en'],
+                    gpu=False,
+                    verbose=False,
+                    download_enabled=True
+                )
+                OCRHandler._easy_reader_initialized = True
+                logger.info("EasyOCR initialized successfully")
+            except Exception as e:
+                logger.warning(f"EasyOCR initialization failed: {e}. "
+                               "Urdu fallback will be disabled. "
+                               "You can retry later or delete ~/.EasyOCR/model/ to force redownload.")
+                OCRHandler._easy_reader = None
+                OCRHandler._easy_reader_initialized = True  # prevent retry spam
+
+    @property
+    def easy_reader(self):
+        return OCRHandler._easy_reader
 
     def preprocess_image(self, pil_image) -> np.ndarray:
         img = np.array(pil_image.convert("RGB"))
@@ -26,14 +45,13 @@ class OCRHandler:
         gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
         gray = cv2.medianBlur(gray, 3)
         
+        # Deskew
         coords = np.column_stack(np.where(gray < 128))
         if len(coords) == 0:
             return gray
         angle = cv2.minAreaRect(coords)[-1]
         if angle < -45:
-            angle = -(90 + angle)
-        else:
-            angle = -angle
+            angle += 90
         (h, w) = gray.shape
         M = cv2.getRotationMatrix2D((w//2, h//2), angle, 1.0)
         gray = cv2.warpAffine(gray, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
@@ -52,7 +70,7 @@ class OCRHandler:
             best_conf = 0.0
             best_psm = 6
 
-            # Tesseract path (Telugu primary)
+            # Tesseract (primary for Telugu + Urdu)
             for psm in OCR_PREFERRED_PSMS:
                 config = f'--psm {psm} --oem 1'
                 data = pytesseract.image_to_data(
@@ -68,21 +86,23 @@ class OCRHandler:
                     best_text = text
                     best_psm = psm
 
-            # EasyOCR fallback for Urdu
+            logger.info(f"Best Tesseract PSM: {best_psm}, Avg conf: {best_conf:.1f}%")
+
+            # EasyOCR fallback for Urdu (only if initialized)
             if self.easy_reader and ("urd" in lang.lower() or lang == "ur"):
                 try:
                     results = self.easy_reader.readtext(np.array(image), detail=1, paragraph=True)
                     if results:
                         text_easy = " ".join(txt for _, txt, _ in results)
-                        conf_easy = sum(conf for _, _, conf in results) / len(results) * 100
-                        if conf_easy > best_conf + 5:  # prefer if noticeably better
+                        conf_easy = sum(conf for _, _, conf in results) * 100 / len(results)
+                        if conf_easy > best_conf + 5:
                             logger.info(f"EasyOCR better for Urdu: {conf_easy:.1f}% vs Tesseract {best_conf:.1f}%")
                             return text_easy.strip(), conf_easy
                 except Exception as e:
-                    logger.warning(f"EasyOCR failed: {e}")
+                    logger.warning(f"EasyOCR fallback failed: {e}")
 
-            logger.info(f"Best PSM: {best_psm}, Avg conf: {best_conf:.1f}%")
             return best_text.strip(), best_conf
+
         except Exception as e:
             logger.error(f"OCR failed: {e}")
             return "", 0.0
